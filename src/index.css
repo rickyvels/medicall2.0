@@ -245,3 +245,43 @@
 
 @keyframes marquee { 0% { transform: translateX(0%); } 100% { transform: translateX(-50%); } }
 .animate-marquee-scroll { display: flex; width: max-content; animation: marquee 28s linear infinite; }
+
+/* ── Extra utilities ── */
+@layer utilities {
+  /* Fade + slide up — para stagger reveals manuales */
+  .animate-fade-up {
+    animation: fade-up 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes fade-up {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Micro bounce — para iconos al seleccionar */
+  .animate-micro-bounce {
+    animation: micro-bounce 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  @keyframes micro-bounce {
+    0%   { transform: scale(1); }
+    40%  { transform: scale(1.2); }
+    70%  { transform: scale(0.92); }
+    100% { transform: scale(1); }
+  }
+
+  /* Glass card shine on hover */
+  .hover-shine {
+    position: relative;
+    overflow: hidden;
+  }
+  .hover-shine::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, transparent 30%, rgba(255,255,255,0.08) 50%, transparent 70%);
+    transform: translateX(-100%);
+    transition: transform 0.5s ease;
+  }
+  .hover-shine:hover::after {
+    transform: translateX(100%);
+  }
+}

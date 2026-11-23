@@ -1,0 +1,1315 @@
+From 5c6e04d3141852956cfb1d236ae47b9ee7e082c5 Mon Sep 17 00:00:00 2001
+From: claude <c@x>
+Date: Sun, 22 Nov 2026 23:56:22 +0000
+Subject: [PATCH] Enterprise readiness: config por cliente, error boundary,
+ consentimiento persistido, legales (borrador), headers de seguridad, CI
+
+---
+ .env.example                               |   8 +
+ .github/workflows/ci.yml                   |  28 ++
+ README.md                                  |  13 +-
+ package-lock.json                          | 338 ++++++++++-----------
+ package.json                               |   2 +-
+ src/api/mock/consent.test.ts               |  14 +
+ src/api/types.ts                           |   2 +
+ src/app-router.tsx                         |   6 +-
+ src/components/ErrorScreen.tsx             |  19 ++
+ src/components/layout/Logo.tsx             |   4 +-
+ src/config/app.ts                          |  24 ++
+ src/features/clinics/ClinicsPage.tsx       |   3 +-
+ src/features/doctors/DoctorProfilePage.tsx |   5 +-
+ src/features/legal/LegalPage.tsx           |  50 +++
+ src/features/onboarding/OnboardingPage.tsx |   9 +-
+ src/features/pro/ProRegisterPage.tsx       |   5 +-
+ src/features/pro/ProStatusPage.tsx         |   3 +-
+ src/features/profile/ProfilePage.tsx       |   5 +-
+ src/features/triage/ResultPage.tsx         |   3 +-
+ vercel.json                                |  20 +-
+ 20 files changed, 358 insertions(+), 203 deletions(-)
+ create mode 100644 .env.example
+ create mode 100644 .github/workflows/ci.yml
+ create mode 100644 src/api/mock/consent.test.ts
+ create mode 100644 src/components/ErrorScreen.tsx
+ create mode 100644 src/config/app.ts
+ create mode 100644 src/features/legal/LegalPage.tsx
+
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..bd1ce18
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,8 @@
++# Copia a .env.local (desarrollo) o configúralo en Vercel (producción).
++VITE_BRAND_NAME=MediCall
++VITE_SUPPORT_EMAIL=soporte@medicall.pe
++VITE_LEGAL_ENTITY=Razón social S.A.C. (RUC 20XXXXXXXXX)
++VITE_EMERGENCY_NUMBER=106
++VITE_EMERGENCY_LABEL=SAMU
++# "false" en producción: oculta herramientas de demostración.
++VITE_DEMO_MODE=true
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+new file mode 100644
+index 0000000..4c2dfc2
+--- /dev/null
++++ b/.github/workflows/ci.yml
+@@ -0,0 +1,28 @@
++name: CI
++on:
++  push: { branches: [main] }
++  pull_request:
++jobs:
++  check:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-node@v4
++        with: { node-version: 22, cache: npm }
++      - run: npm ci
++      - run: npm run check
++      - run: npm run build
++      - run: npm audit --omit=dev --audit-level=high
++  e2e:
++    runs-on: ubuntu-latest
++    needs: check
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-node@v4
++        with: { node-version: 22, cache: npm }
++      - run: npm ci
++      - run: npx playwright install --with-deps chromium
++      - run: npm run test:e2e
++      - uses: actions/upload-artifact@v4
++        if: failure()
++        with: { name: playwright-traces, path: test-results }
+diff --git a/README.md b/README.md
+index 93d5483..a0c0f77 100644
+--- a/README.md
++++ b/README.md
+@@ -31,6 +31,17 @@ Sidebar + ⌘K en escritorio, tab bar en móvil; flujos enfocados (triaje, búsq
+ La imagen del hero (`public/images/hero-doctors.jpg`) es de baja resolución (678 px): conviene reemplazarla por una
+ versión grande y con licencia clara antes de producción.
+ 
+-## Pendiente
++## Configuración por cliente (marca blanca)
++Copia `.env.example` a `.env.local`. Marca, correo de soporte, razón social, número de emergencia y `VITE_DEMO_MODE`
++se definen por variables de entorno. En producción usar `VITE_DEMO_MODE=false`.
++Los textos legales (`/app/legal/*`) son **borrador** y deben ser aprobados por el área legal del cliente.
++`vercel.json` incluye CSP, HSTS y Permissions-Policy: si el backend vive en otro dominio, agregarlo a `connect-src`.
++
++## Pendiente antes de producción con un cliente grande
++Autenticación real (hoy "Cerrar sesión" es un stub), backend que implemente `MediCallApi` (hoy todo es mock en `localStorage`,
++que **no** debe contener datos de pacientes reales), video real, pagos, auditoría de accesos a historia clínica,
++validación clínica del triaje, imágenes propias de la landing (hoy en Cloudinary de terceros) y revisión legal.
++
++## Pendiente de producto
+ Video real (LiveKit/Daily), pagos, push notifications, panel completo del médico (cola, ganancias), mapa de clínicas,
+ reseñas reales tras cada consulta, backend de verificación de colegiatura.
+diff --git a/package-lock.json b/package-lock.json
+index 65345cc..ca5412d 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,11 +1,11 @@
+ {
+-  "name": "frontend",
++  "name": "medicall-web",
+   "version": "0.0.0",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+-      "name": "frontend",
++      "name": "medicall-web",
+       "version": "0.0.0",
+       "dependencies": {
+         "@fontsource-variable/inter": "^5.3.0",
+@@ -1899,20 +1899,37 @@
+       }
+     },
+     "node_modules/@eslint/config-array": {
+-      "version": "0.23.5",
+-      "resolved": "https://registry.npmjs.org/@eslint/config-array/-/config-array-0.23.5.tgz",
+-      "integrity": "sha512-Y3kKLvC1dvTOT+oGlqNQ1XLqK6D1HU2YXPc52NmAlJZbMMWDzGYXMiPRJ8TYD39muD/OTjlZmNJ4ib7dvSrMBA==",
++      "version": "0.23.6",
++      "resolved": "https://registry.npmjs.org/@eslint/config-array/-/config-array-0.23.6.tgz",
++      "integrity": "sha512-WrTH7nioI9QPY4NZGnsywmecswJdgeq4BCM76qok9VgjTO29ZgUzUvcuJLVPYVQM4uDbaPBU0M33R9DIxI8X3w==",
+       "dev": true,
+       "license": "Apache-2.0",
+       "dependencies": {
+         "@eslint/object-schema": "^3.0.5",
+         "debug": "^4.3.1",
+-        "minimatch": "^10.2.4"
++        "minimatch": "^11.0.5"
+       },
+       "engines": {
+         "node": "^20.19.0 || ^22.13.0 || >=24"
+       }
+     },
++    "node_modules/@eslint/config-array/node_modules/minimatch": {
++      "version": "11.0.9",
++      "resolved": "https://registry.npmjs.org/minimatch/-/minimatch-11.0.9.tgz",
++      "integrity": "sha512-KCFkfyjqerNlSstjlhIGNXIKZGA/6O4V4RlhZ+Dsr621SPPw0mzlypE9D9ZOoPiVefHID+j7/XuMMlqfD/F60Q==",
++      "dev": true,
++      "license": "BlueOak-1.0.0",
++      "dependencies": {
++        "@isaacs/nonrecursive-glob-match": "^1.1.0",
++        "brace-expansion": "^5.0.12"
++      },
++      "engines": {
++        "node": "20 || >=22"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/isaacs"
++      }
++    },
+     "node_modules/@eslint/config-helpers": {
+       "version": "0.7.0",
+       "resolved": "https://registry.npmjs.org/@eslint/config-helpers/-/config-helpers-0.7.0.tgz",
+@@ -2215,6 +2232,13 @@
+         "node": ">=18"
+       }
+     },
++    "node_modules/@isaacs/nonrecursive-glob-match": {
++      "version": "1.1.0",
++      "resolved": "https://registry.npmjs.org/@isaacs/nonrecursive-glob-match/-/nonrecursive-glob-match-1.1.0.tgz",
++      "integrity": "sha512-GPm/Dbvk5RLmhRnxXIa7nTpK0xtl4E0wj0MslsuNiJ1FIROU+2+9lgUC/dgF7Ey4QCWhfEsgxilMRMCdHPfDfw==",
++      "dev": true,
++      "license": "BlueOak-1.0.0"
++    },
+     "node_modules/@jridgewell/gen-mapping": {
+       "version": "0.3.13",
+       "resolved": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz",
+@@ -2303,9 +2327,6 @@
+         "x64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -2939,9 +2960,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -2958,9 +2976,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -2977,9 +2992,6 @@
+       "cpu": [
+         "ppc64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -2996,9 +3008,6 @@
+       "cpu": [
+         "s390x"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3015,9 +3024,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3034,9 +3040,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3350,9 +3353,6 @@
+         "arm"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3367,9 +3367,6 @@
+         "arm"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3384,9 +3381,6 @@
+         "arm64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3401,9 +3395,6 @@
+         "arm64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3418,9 +3409,6 @@
+         "loong64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3435,9 +3423,6 @@
+         "loong64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3452,9 +3437,6 @@
+         "ppc64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3469,9 +3451,6 @@
+         "ppc64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3486,9 +3465,6 @@
+         "riscv64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3503,9 +3479,6 @@
+         "riscv64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3520,9 +3493,6 @@
+         "s390x"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3537,9 +3507,6 @@
+         "x64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3554,9 +3521,6 @@
+         "x64"
+       ],
+       "dev": true,
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -3804,9 +3768,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -3827,9 +3788,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -3850,9 +3808,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -3873,9 +3828,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -4039,9 +3991,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -4058,9 +4007,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -4077,9 +4023,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -4096,9 +4039,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -4461,17 +4401,17 @@
+       "license": "MIT"
+     },
+     "node_modules/@typescript-eslint/eslint-plugin": {
+-      "version": "8.71.2",
+-      "resolved": "https://registry.npmjs.org/@typescript-eslint/eslint-plugin/-/eslint-plugin-8.71.2.tgz",
+-      "integrity": "sha512-K72/pvT7qpm8q3k8G5u93NCSN1RcLxX5h7Gw0bQpbMXviBHeY6Nx1WEwmk9wP+eKTSQ8ecxvcgt/ZX/rB938xQ==",
++      "version": "8.73.0",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/eslint-plugin/-/eslint-plugin-8.73.0.tgz",
++      "integrity": "sha512-UkygMFer53Yzn29MCYFTHf34hGXf5KJhiDWfIm1tXtXRrym1CS6l5H9Y3yCtPWChpC0/f93H88gdj8tN0dd4kw==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "@eslint-community/regexpp": "^4.12.2",
+-        "@typescript-eslint/scope-manager": "8.71.2",
+-        "@typescript-eslint/type-utils": "8.71.2",
+-        "@typescript-eslint/utils": "8.71.2",
+-        "@typescript-eslint/visitor-keys": "8.71.2",
++        "@typescript-eslint/scope-manager": "8.73.0",
++        "@typescript-eslint/type-utils": "8.73.0",
++        "@typescript-eslint/utils": "8.73.0",
++        "@typescript-eslint/visitor-keys": "8.73.0",
+         "ignore": "^7.0.5",
+         "natural-compare": "^1.4.0",
+         "ts-api-utils": "^2.5.0"
+@@ -4484,15 +4424,15 @@
+         "url": "https://opencollective.com/typescript-eslint"
+       },
+       "peerDependencies": {
+-        "@typescript-eslint/parser": "^8.71.2",
++        "@typescript-eslint/parser": "^8.73.0",
+         "eslint": "^8.57.0 || ^9.0.0 || ^10.0.0",
+         "typescript": ">=4.8.4 <6.1.0"
+       }
+     },
+     "node_modules/@typescript-eslint/eslint-plugin/node_modules/ignore": {
+-      "version": "7.0.12",
+-      "resolved": "https://registry.npmjs.org/ignore/-/ignore-7.0.12.tgz",
+-      "integrity": "sha512-/8UvqAPU9DGTI9k4mxtf49U37Isfwr8Uts96+SBHIkFxPJnHS0Ew4f00sM4Scd8V8EjM0jUNtVDdv1kPdt35lg==",
++      "version": "7.0.16",
++      "resolved": "https://registry.npmjs.org/ignore/-/ignore-7.0.16.tgz",
++      "integrity": "sha512-52N+Y4HRMOJmbLmr+DqO4iSRyyB7N52gm7PWCT6h0p978+oKbqHCB7gIJIwZvBUsjlSdWbrBFqUSmIFNZMpn0A==",
+       "dev": true,
+       "license": "MIT",
+       "engines": {
+@@ -4500,16 +4440,16 @@
+       }
+     },
+     "node_modules/@typescript-eslint/parser": {
+-      "version": "8.71.2",
+-      "resolved": "https://registry.npmjs.org/@typescript-eslint/parser/-/parser-8.71.2.tgz",
+-      "integrity": "sha512-aTtmZjp/x3gsGHkDs04/1I8kNogBJkpQaeGaN0PfiG43NzDEmW2n+OP5im9wfsvyX0yP1UZWBrAGtDBfH9jEVw==",
++      "version": "8.73.0",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/parser/-/parser-8.73.0.tgz",
++      "integrity": "sha512-AuL45bVcmssHfZ3Di3cs9Q0l4gBm4ZFVrJOQEE7VpqW+PVgQaEwSwazz4TVIiFabXkk6U51EprYDwqw+HR8ePw==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+-        "@typescript-eslint/scope-manager": "8.71.2",
+-        "@typescript-eslint/types": "8.71.2",
+-        "@typescript-eslint/typescript-estree": "8.71.2",
+-        "@typescript-eslint/visitor-keys": "8.71.2",
++        "@typescript-eslint/scope-manager": "8.73.0",
++        "@typescript-eslint/types": "8.73.0",
++        "@typescript-eslint/typescript-estree": "8.73.0",
++        "@typescript-eslint/visitor-keys": "8.73.0",
+         "debug": "^4.4.3"
+       },
+       "engines": {
+@@ -4525,14 +4465,14 @@
+       }
+     },
+     "node_modules/@typescript-eslint/project-service": {
+-      "version": "8.71.2",
+-      "resolved": "https://registry.npmjs.org/@typescript-eslint/project-service/-/project-service-8.71.2.tgz",
+-      "integrity": "sha512-Pd68GsLVh5ZXlcEccFPdhSOvtHZ/2WU0XsA8zmXOS3F158lVlcTLhfQ6qvtL1RzbMie0Kp8xtbVwAg4nejKPHw==",
++      "version": "8.73.0",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/project-service/-/project-service-8.73.0.tgz",
++      "integrity": "sha512-/pEf8Rc4Mjk+qJnY0uO1+Gadeal8uv50xpuic+srG2vIVatA0XxvWMUeMtFvs6OCHqftiQ7/+qH4aehG5stzIA==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+-        "@typescript-eslint/tsconfig-utils": "^8.71.2",
+-        "@typescript-eslint/types": "^8.71.2",
++        "@typescript-eslint/tsconfig-utils": "^8.73.0",
++        "@typescript-eslint/types": "^8.73.0",
+         "debug": "^4.4.3"
+       },
+       "engines": {
+@@ -4547,14 +4487,14 @@
+       }
+     },
+     "node_modules/@typescript-eslint/scope-manager": {
+-      "version": "8.71.2",
+-      "resolved": "https://registry.npmjs.org/@typescript-eslint/scope-manager/-/scope-manager-8.71.2.tgz",
+-      "integrity": "sha512-YF4wgg5iUX5Obywoac27B56FhozMNFhdJSbh11H5GBAwmBtfyRhmgTQqW9tRNNmHDvsZ2CX6UGzoz+YfYn2Leg==",
++      "version": "8.73.0",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/scope-manager/-/scope-manager-8.73.0.tgz",
++      "integrity": "sha512-/TjD738Iq2rzj5z0ixVOi+TsvgjAzZPLPaH1yWdDBytR/HTR5gMpyYWZeCe5WTQZLwk3ho8AV7U3muoQCRtXBQ==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+-        "@typescript-eslint/types": "8.71.2",
+-        "@typescript-eslint/visitor-keys": "8.71.2"
++        "@typescript-eslint/types": "8.73.0",
++        "@typescript-eslint/visitor-keys": "8.73.0"
+       },
+       "engines": {
+         "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
+@@ -4565,9 +4505,9 @@
+       }
+     },
+     "node_modules/@typescript-eslint/tsconfig-utils": {
+-      "version": "8.71.2",
+-      "resolved": "https://registry.npmjs.org/@typescript-eslint/tsconfig-utils/-/tsconfig-utils-8.71.2.tgz",
+-      "integrity": "sha512-jz49TAWokm/7yWD9/o837nYax9DyALxIPOImdImvVzo6canBCZYzin8zJyqNR5k1j9K1DE0bVvr0XYB+99uAdg==",
++      "version": "8.73.0",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/tsconfig-utils/-/tsconfig-utils-8.73.0.tgz",
++      "integrity": "sha512-lmtCFOfYaJfpqZywGuXi4FpNtE+NQ+YLe3T0K9rtEDcW8ZuGWvfI++pj8r05sYMI8vWT2CYK4rWyedmD6Rp4og==",
+       "dev": true,
+       "license": "MIT",
+       "engines": {
+@@ -4582,15 +4522,15 @@
+       }
+     },
+     "node_modules/@typescript-eslint/type-utils": {
+-      "version": "8.71.2",
+-      "resolved": "https://registry.npmjs.org/@typescript-eslint/type-utils/-/type-utils-8.71.2.tgz",
+-      "integrity": "sha512-cC8UaalCViJkb3rH/xLIvidEwoFRtMZMUqDjjJMGEKaTFwYRHYBcoczlEGHuvkHEO8svRDrgZ0yQgOArFmwang==",
++      "version": "8.73.0",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/type-utils/-/type-utils-8.73.0.tgz",
++      "integrity": "sha512-MOC9i4xy1F7KcDde7Ip8jf1SrRiALb2Km4UWxGNjUE2YlhjIEo1ayE27GHIwIQyfWuHTmEonQT14uyurlyC6aA==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+-        "@typescript-eslint/types": "8.71.2",
+-        "@typescript-eslint/typescript-estree": "8.71.2",
+-        "@typescript-eslint/utils": "8.71.2",
++        "@typescript-eslint/types": "8.73.0",
++        "@typescript-eslint/typescript-estree": "8.73.0",
++        "@typescript-eslint/utils": "8.73.0",
+         "debug": "^4.4.3",
+         "ts-api-utils": "^2.5.0"
+       },
+@@ -4607,9 +4547,9 @@
+       }
+     },
+     "node_modules/@typescript-eslint/types": {
+-      "version": "8.71.2",
+-      "resolved": "https://registry.npmjs.org/@typescript-eslint/types/-/types-8.71.2.tgz",
+-      "integrity": "sha512-y5Ukl3oVp7e/VGxqIoEXoeb/Roj71PAJ4WG/N/RGj+eeDvKRLM15kGr9MijLbN0i03S52zxu31Z98E5gWChJKw==",
++      "version": "8.73.0",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/types/-/types-8.73.0.tgz",
++      "integrity": "sha512-O/1ytYzflF16QDKXx4/qOXg1IuZp+n7hr9t+S0nv7N/2Tl8rJiNCshztV1gcSUvHbPtoX3+zmNbtSAyVbzxVfw==",
+       "dev": true,
+       "license": "MIT",
+       "engines": {
+@@ -4621,18 +4561,18 @@
+       }
+     },
+     "node_modules/@typescript-eslint/typescript-estree": {
+-      "version": "8.71.2",
+-      "resolved": "https://registry.npmjs.org/@typescript-eslint/typescript-estree/-/typescript-estree-8.71.2.tgz",
+-      "integrity": "sha512-DgNOEsl4pdYzwSL+N/Cl33tX1Hlw3FvId73LnKXfq7jnrF2viOEn7X+P7RBkkSWCVm92gnWd28GIC5vJuLREeA==",
++      "version": "8.73.0",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/typescript-estree/-/typescript-estree-8.73.0.tgz",
++      "integrity": "sha512-InjlBkSdWceIwIBWSwS3ENUp+i0O02PGX3Zv2wnihWJC1WDVGvG7mTHuf8b57uAaITj94d6tRPDH+sUEtXdRQQ==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+-        "@typescript-eslint/project-service": "8.71.2",
+-        "@typescript-eslint/tsconfig-utils": "8.71.2",
+-        "@typescript-eslint/types": "8.71.2",
+-        "@typescript-eslint/visitor-keys": "8.71.2",
++        "@typescript-eslint/project-service": "8.73.0",
++        "@typescript-eslint/tsconfig-utils": "8.73.0",
++        "@typescript-eslint/types": "8.73.0",
++        "@typescript-eslint/visitor-keys": "8.73.0",
+         "debug": "^4.4.3",
+-        "minimatch": "^10.2.2",
++        "minimatch": "^11.0.1",
+         "semver": "^7.7.3",
+         "tinyglobby": "^0.2.15",
+         "ts-api-utils": "^2.5.0"
+@@ -4645,13 +4585,36 @@
+         "url": "https://opencollective.com/typescript-eslint"
+       },
+       "peerDependencies": {
++        "@typescript/native": "npm:typescript@>=7.1.0-dev.20261009.1 || >=7.1.0-beta <7.1.0-dev",
+         "typescript": ">=4.8.4 <6.1.0"
++      },
++      "peerDependenciesMeta": {
++        "@typescript/native": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@typescript-eslint/typescript-estree/node_modules/minimatch": {
++      "version": "11.0.9",
++      "resolved": "https://registry.npmjs.org/minimatch/-/minimatch-11.0.9.tgz",
++      "integrity": "sha512-KCFkfyjqerNlSstjlhIGNXIKZGA/6O4V4RlhZ+Dsr621SPPw0mzlypE9D9ZOoPiVefHID+j7/XuMMlqfD/F60Q==",
++      "dev": true,
++      "license": "BlueOak-1.0.0",
++      "dependencies": {
++        "@isaacs/nonrecursive-glob-match": "^1.1.0",
++        "brace-expansion": "^5.0.12"
++      },
++      "engines": {
++        "node": "20 || >=22"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/isaacs"
+       }
+     },
+     "node_modules/@typescript-eslint/typescript-estree/node_modules/semver": {
+-      "version": "7.8.5",
+-      "resolved": "https://registry.npmjs.org/semver/-/semver-7.8.5.tgz",
+-      "integrity": "sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==",
++      "version": "7.8.6",
++      "resolved": "https://registry.npmjs.org/semver/-/semver-7.8.6.tgz",
++      "integrity": "sha512-9lpSSU4Mly3mrtruwLs1eLK6+gzbzqeBFwRNjIjE+9LuDpWdYctrQlQ3ej1Ilgi7gknpsTRnPoLP8DpCHqHIJw==",
+       "dev": true,
+       "license": "ISC",
+       "bin": {
+@@ -4662,16 +4625,16 @@
+       }
+     },
+     "node_modules/@typescript-eslint/utils": {
+-      "version": "8.71.2",
+-      "resolved": "https://registry.npmjs.org/@typescript-eslint/utils/-/utils-8.71.2.tgz",
+-      "integrity": "sha512-RyKa1G1M9rKHDhrk+HJtiF1MvLD5Ux2JW3TSkzw+02pRALdpJb+QzG1Y5em+LvCgzGwgg8H7mBRFKljNz7ImPw==",
++      "version": "8.73.0",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/utils/-/utils-8.73.0.tgz",
++      "integrity": "sha512-j2SVJJvVkXdUL0WcEzo4vEH1mO1vIi8KlVukcYA2MgMZvYN2LlZR4PmsW+GTSxSW24j6Q/EP7+MOifLtg5hmsA==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "@eslint-community/eslint-utils": "^4.9.1",
+-        "@typescript-eslint/scope-manager": "8.71.2",
+-        "@typescript-eslint/types": "8.71.2",
+-        "@typescript-eslint/typescript-estree": "8.71.2"
++        "@typescript-eslint/scope-manager": "8.73.0",
++        "@typescript-eslint/types": "8.73.0",
++        "@typescript-eslint/typescript-estree": "8.73.0"
+       },
+       "engines": {
+         "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
+@@ -4686,13 +4649,13 @@
+       }
+     },
+     "node_modules/@typescript-eslint/visitor-keys": {
+-      "version": "8.71.2",
+-      "resolved": "https://registry.npmjs.org/@typescript-eslint/visitor-keys/-/visitor-keys-8.71.2.tgz",
+-      "integrity": "sha512-zozlN0UA32bSG2zkKAgQyRYSbEISVoyU6vvkKYo2aSny74D8Jh4e+POkJ6Lk0dlezZi5x7TtD+88Xb06IB8nhg==",
++      "version": "8.73.0",
++      "resolved": "https://registry.npmjs.org/@typescript-eslint/visitor-keys/-/visitor-keys-8.73.0.tgz",
++      "integrity": "sha512-k4lsFVpRZICbltkIEEH4hZRkwXkqDF1GHBpClKQOHQY+RkoZAAuyc1ci3I6p+CB6v3U4jaHIUshc4RzzQXZWLg==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+-        "@typescript-eslint/types": "8.71.2",
++        "@typescript-eslint/types": "8.73.0",
+         "eslint-visitor-keys": "^5.0.0"
+       },
+       "engines": {
+@@ -5754,9 +5717,9 @@
+       }
+     },
+     "node_modules/eslint": {
+-      "version": "10.12.0",
+-      "resolved": "https://registry.npmjs.org/eslint/-/eslint-10.12.0.tgz",
+-      "integrity": "sha512-npHjrHb2o4ehH3mE+YuxABR+0gyb0aVWCIolgJDArwCiHEIsonBm3ZKjel5b0U5+a+MbEvIyRCGCzD3eKKK2NA==",
++      "version": "10.15.0",
++      "resolved": "https://registry.npmjs.org/eslint/-/eslint-10.15.0.tgz",
++      "integrity": "sha512-+5Wg4p+ze3sG1WErYgUO/3H1IQIfFBymVUA0Fo/XTeBOLS6UQIUekpSJ8sdRkn7O7wjh84b55w/roqavH2aScg==",
+       "dev": true,
+       "license": "MIT",
+       "workspaces": [
+@@ -5765,11 +5728,11 @@
+       "dependencies": {
+         "@eslint-community/eslint-utils": "^4.8.0",
+         "@eslint-community/regexpp": "^4.12.2",
+-        "@eslint/config-array": "^0.23.5",
++        "@eslint/config-array": "^0.23.6",
+         "@eslint/config-helpers": "^0.7.0",
+         "@eslint/core": "^1.2.1",
+         "@eslint/plugin-kit": "^0.7.3",
+-        "@humanfs/node": "^0.16.6",
++        "@humanfs/node": "^0.16.8",
+         "@humanwhocodes/module-importer": "^1.0.1",
+         "@humanwhocodes/retry": "^0.4.2",
+         "@types/estree": "^1.0.6",
+@@ -5790,7 +5753,7 @@
+         "imurmurhash": "^0.1.4",
+         "is-glob": "^4.0.0",
+         "json-stable-stringify-without-jsonify": "^1.0.1",
+-        "minimatch": "^10.2.5",
++        "minimatch": "^11.0.5",
+         "natural-compare": "^1.4.0",
+         "optionator": "^0.9.3"
+       },
+@@ -5898,6 +5861,23 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/eslint/node_modules/minimatch": {
++      "version": "11.0.9",
++      "resolved": "https://registry.npmjs.org/minimatch/-/minimatch-11.0.9.tgz",
++      "integrity": "sha512-KCFkfyjqerNlSstjlhIGNXIKZGA/6O4V4RlhZ+Dsr621SPPw0mzlypE9D9ZOoPiVefHID+j7/XuMMlqfD/F60Q==",
++      "dev": true,
++      "license": "BlueOak-1.0.0",
++      "dependencies": {
++        "@isaacs/nonrecursive-glob-match": "^1.1.0",
++        "brace-expansion": "^5.0.12"
++      },
++      "engines": {
++        "node": "20 || >=22"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/isaacs"
++      }
++    },
+     "node_modules/espree": {
+       "version": "11.2.0",
+       "resolved": "https://registry.npmjs.org/espree/-/espree-11.2.0.tgz",
+@@ -6017,9 +5997,9 @@
+       "license": "MIT"
+     },
+     "node_modules/fast-uri": {
+-      "version": "3.1.8",
+-      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.8.tgz",
+-      "integrity": "sha512-GZMtZUTNRpOVIECoXwLNZS5xUGE+mVNbTB8h/7Rwh2TFWcBQiPzTgyZi05BF9UMZKkLJv8XBRJTlU7zg8+ZfMg==",
++      "version": "3.1.9",
++      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.9.tgz",
++      "integrity": "sha512-hS/0Wt3Ya043oKXs0sIxrMpKQITXhMLIrVAKKXi4gozGC9v7YRWVnXIZzjNPTO02M9BdxLCWqK1yRXgNziVyJQ==",
+       "devOptional": true,
+       "funding": [
+         {
+@@ -7424,9 +7404,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -7447,9 +7424,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -7470,9 +7444,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -7493,9 +7464,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MPL-2.0",
+       "optional": true,
+       "os": [
+@@ -8558,9 +8526,9 @@
+       }
+     },
+     "node_modules/serialize-javascript": {
+-      "version": "7.1.2",
+-      "resolved": "https://registry.npmjs.org/serialize-javascript/-/serialize-javascript-7.1.2.tgz",
+-      "integrity": "sha512-GL2BWwVa6JydKO6l/ljVgjAZF4QJ3S7dWDWi53s5GZT8PJzD2fNxi67HANQGKAqPrwEpL5ba7gUBGi0Ls/sEoQ==",
++      "version": "7.1.4",
++      "resolved": "https://registry.npmjs.org/serialize-javascript/-/serialize-javascript-7.1.4.tgz",
++      "integrity": "sha512-FqlEuoTq/zRmA4Lg6aOqyH3lCHbUtCB0bmHCeFniX2GBdDqMJM3FwdvEhlE5Pim1dlt2FfBdVPmUNNiGhhKqpw==",
+       "dev": true,
+       "license": "BSD-3-Clause",
+       "engines": {
+@@ -9256,16 +9224,16 @@
+       }
+     },
+     "node_modules/typescript-eslint": {
+-      "version": "8.71.2",
+-      "resolved": "https://registry.npmjs.org/typescript-eslint/-/typescript-eslint-8.71.2.tgz",
+-      "integrity": "sha512-Rz4effbMy2g9wnvOJZG6SbVavX313Lap1vNEbk1RUochzickvzP8P4HB+bkNg5e50eVz1hQGjh9K1omI1xB4Bw==",
++      "version": "8.73.0",
++      "resolved": "https://registry.npmjs.org/typescript-eslint/-/typescript-eslint-8.73.0.tgz",
++      "integrity": "sha512-+EnKy9rkYPun4l+kG2bDuYWQ6y1tGVgdR/tY1U9AC6h21CjEwOoc7gsjwe0FXB8uWFzk4QiCFbuRWgX758PiAg==",
+       "dev": true,
+       "license": "MIT",
+       "dependencies": {
+-        "@typescript-eslint/eslint-plugin": "8.71.2",
+-        "@typescript-eslint/parser": "8.71.2",
+-        "@typescript-eslint/typescript-estree": "8.71.2",
+-        "@typescript-eslint/utils": "8.71.2"
++        "@typescript-eslint/eslint-plugin": "8.73.0",
++        "@typescript-eslint/parser": "8.73.0",
++        "@typescript-eslint/typescript-estree": "8.73.0",
++        "@typescript-eslint/utils": "8.73.0"
+       },
+       "engines": {
+         "node": "^18.18.0 || ^20.9.0 || >=21.1.0"
+@@ -9299,9 +9267,9 @@
+       }
+     },
+     "node_modules/undici": {
+-      "version": "8.11.2",
+-      "resolved": "https://registry.npmjs.org/undici/-/undici-8.11.2.tgz",
+-      "integrity": "sha512-u4UB2/IrKdU6lFxumHmmo1a3fCQO5tzQllRorfoRS63txhrB7xTpSn1PftwC4qEHkOaqP95fCWW4lJzwErwzhQ==",
++      "version": "8.13.1",
++      "resolved": "https://registry.npmjs.org/undici/-/undici-8.13.1.tgz",
++      "integrity": "sha512-Kt7EaPjh0s93lJH/PmW3d5rhkcpUa6fS3jqZ7+YGxNd9L7Xy/i827xe4C2uhhq+pJebM4tQOl5AgHmW11G5Skg==",
+       "dev": true,
+       "license": "MIT",
+       "engines": {
+diff --git a/package.json b/package.json
+index 0851a3a..c210a6c 100644
+--- a/package.json
++++ b/package.json
+@@ -1,5 +1,5 @@
+ {
+-  "name": "frontend",
++  "name": "medicall-web",
+   "private": true,
+   "version": "0.0.0",
+   "type": "module",
+diff --git a/src/api/mock/consent.test.ts b/src/api/mock/consent.test.ts
+new file mode 100644
+index 0000000..c65e50b
+--- /dev/null
++++ b/src/api/mock/consent.test.ts
+@@ -0,0 +1,14 @@
++import { beforeEach, describe, expect, it } from 'vitest'
++import { mockApi } from './client'
++import { resetDb } from './db'
++
++describe('consentimiento informado', () => {
++  beforeEach(() => resetDb())
++
++  it('se guarda con versión y fecha al completar el onboarding', async () => {
++    const acceptedAt = new Date().toISOString()
++    const p = await mockApi.profile.completeOnboarding({ firstName: 'Ana', consent: { version: 'v-test', acceptedAt } })
++    expect(p.onboarded).toBe(true)
++    expect(p.consent).toEqual({ version: 'v-test', acceptedAt })
++  })
++})
+diff --git a/src/api/types.ts b/src/api/types.ts
+index b12815c..1badff7 100644
+--- a/src/api/types.ts
++++ b/src/api/types.ts
+@@ -260,6 +260,8 @@ export interface Profile {
+   conditions: string[]
+   dependents: { id: string; name: string; relation: string }[]
+   onboarded: boolean
++  /** Evidencia del consentimiento informado de telesalud y tratamiento de datos (Ley 29733 / Ley 30421). */
++  consent?: { version: string; acceptedAt: string }
+ }
+ 
+ export interface Promo {
+diff --git a/src/app-router.tsx b/src/app-router.tsx
+index dcf32fc..73b21b7 100644
+--- a/src/app-router.tsx
++++ b/src/app-router.tsx
+@@ -2,6 +2,7 @@ import { lazy, Suspense } from 'react'
+ import { createBrowserRouter, Navigate, Outlet, RouterProvider } from 'react-router-dom'
+ import { useProfile } from '@/api/hooks'
+ import { AppShell } from '@/components/layout/AppShell'
++import { ErrorScreen } from '@/components/ErrorScreen'
+ import { FocusLayout } from '@/components/layout/FocusLayout'
+ import { Skeleton } from '@/components/ui/skeleton'
+ 
+@@ -22,6 +23,7 @@ const Wellness = lazy(() => import('@/features/wellness/WellnessPage'))
+ const Wallet = lazy(() => import('@/features/wallet/WalletPage'))
+ const Profile = lazy(() => import('@/features/profile/ProfilePage'))
+ const Animations = lazy(() => import('@/features/dev/AnimationsPage'))
++const Legal = lazy(() => import('@/features/legal/LegalPage'))
+ const Onboarding = lazy(() => import('@/features/onboarding/OnboardingPage'))
+ 
+ const Fallback = () => <div className="space-y-4 p-4" role="status" aria-label="Cargando"><Skeleton className="h-10 w-1/2" /><Skeleton className="h-48" /></div>
+@@ -35,10 +37,12 @@ function Guard() {
+ }
+ 
+ const router = createBrowserRouter([
++  { path: '/legal/:doc', element: <Suspense fallback={<Fallback />}><Legal /></Suspense>, errorElement: <ErrorScreen /> },
+   ...(import.meta.env.DEV ? [{ path: '/dev/animaciones', element: <Suspense fallback={null}><Animations /></Suspense> }] : []),
+-  { path: '/bienvenida', element: <Suspense fallback={<Fallback />}><Onboarding /></Suspense> },
++  { path: '/bienvenida', element: <Suspense fallback={<Fallback />}><Onboarding /></Suspense>, errorElement: <ErrorScreen /> },
+   {
+     element: <Guard />,
++    errorElement: <ErrorScreen />,
+     children: [
+       {
+         element: <AppShell />,
+diff --git a/src/components/ErrorScreen.tsx b/src/components/ErrorScreen.tsx
+new file mode 100644
+index 0000000..4258456
+--- /dev/null
++++ b/src/components/ErrorScreen.tsx
+@@ -0,0 +1,19 @@
++import { useRouteError } from 'react-router-dom'
++import { BRAND, EMERGENCY } from '@/config/app'
++
++/** Pantalla de respaldo: evita la pantalla en blanco ante cualquier error de render o de carga de ruta. */
++export function ErrorScreen() {
++  const error = useRouteError()
++  if (import.meta.env.DEV) console.error(error)
++  return (
++    <main role="alert" className="mx-auto flex min-h-dvh max-w-md flex-col items-center justify-center gap-4 px-6 text-center">
++      <h1 className="text-3xl font-bold">Algo salió mal</h1>
++      <p className="text-muted">No pudimos mostrar esta pantalla. Tus datos no se perdieron. Si estás en medio de una consulta, vuelve a ingresar desde el inicio.</p>
++      <div className="flex flex-wrap justify-center gap-3">
++        <button type="button" onClick={() => window.location.reload()} className="rounded-full bg-primary px-5 py-2.5 font-medium text-primary-foreground">Reintentar</button>
++        <a href="/app/" className="rounded-full border border-border px-5 py-2.5 font-medium">Ir al inicio</a>
++      </div>
++      <p className="text-sm text-muted">¿Es una emergencia? Llama al <a className="underline" href={`tel:${EMERGENCY.number}`}>{EMERGENCY.number} ({EMERGENCY.label})</a>. {BRAND.name} no reemplaza servicios de emergencia.</p>
++    </main>
++  )
++}
+diff --git a/src/components/layout/Logo.tsx b/src/components/layout/Logo.tsx
+index 1a46621..066a3d0 100644
+--- a/src/components/layout/Logo.tsx
++++ b/src/components/layout/Logo.tsx
+@@ -1,8 +1,10 @@
++import { BRAND } from '@/config/app'
++
+ export function Logo({ className = '' }: { className?: string }) {
+   return (
+     <div className={`flex items-center gap-2 ${className}`}>
+       <svg viewBox="0 0 32 32" className="size-8" aria-hidden><rect width="32" height="32" rx="9" fill="var(--primary)" /><path d="M13 7h6v6h6v6h-6v6h-6v-6H7v-6h6z" fill="var(--primary-foreground)" /></svg>
+-      <span className="font-display text-xl font-bold tracking-tight">MediCall</span>
++      <span className="font-display text-xl font-bold tracking-tight">{BRAND.name}</span>
+     </div>
+   )
+ }
+diff --git a/src/config/app.ts b/src/config/app.ts
+new file mode 100644
+index 0000000..e9a9cb8
+--- /dev/null
++++ b/src/config/app.ts
+@@ -0,0 +1,24 @@
++/**
++ * Configuración de la instalación (marca blanca, modo demo, números de emergencia).
++ * Todo se define por variables de entorno `VITE_*` para que cada cliente (clínica)
++ * pueda desplegar su propia versión sin tocar el código. Ver `.env.example`.
++ */
++const env = import.meta.env
++
++export const BRAND = {
++  name: env.VITE_BRAND_NAME || 'MediCall',
++  supportEmail: env.VITE_SUPPORT_EMAIL || 'soporte@medicall.pe',
++  /** Razón social del responsable del tratamiento de datos (Ley 29733). */
++  legalEntity: env.VITE_LEGAL_ENTITY || 'MediCall (razón social por definir)',
++}
++
++export const EMERGENCY = {
++  number: env.VITE_EMERGENCY_NUMBER || '106',
++  label: env.VITE_EMERGENCY_LABEL || 'SAMU',
++}
++
++/** El modo demo habilita utilidades de prueba (reiniciar datos). Debe ser `false` en producción. */
++export const IS_DEMO = env.VITE_DEMO_MODE !== 'false'
++
++/** Versión vigente de los textos legales: se guarda junto al consentimiento del paciente. */
++export const LEGAL_VERSION = '2026-11-borrador'
+diff --git a/src/features/clinics/ClinicsPage.tsx b/src/features/clinics/ClinicsPage.tsx
+index 68c396b..7cac17f 100644
+--- a/src/features/clinics/ClinicsPage.tsx
++++ b/src/features/clinics/ClinicsPage.tsx
+@@ -11,6 +11,7 @@ import { Lottie } from '@/components/ui/lottie'
+ import { Sheet } from '@/components/ui/sheet'
+ import { Skeleton } from '@/components/ui/skeleton'
+ import { EmptyState, ErrorState } from '@/components/ui/states'
++import { BRAND } from '@/config/app'
+ 
+ export default function ClinicsPage() {
+   const { data, isPending, isError, refetch } = useClinics()
+@@ -39,7 +40,7 @@ export default function ClinicsPage() {
+                 <div className="flex flex-wrap gap-1.5">{c.specialties.map((s) => <Badge key={s}>{s}</Badge>)}</div>
+                 <div className="flex items-center justify-between text-sm">
+                   <span className="flex items-center gap-1"><Star className="size-4 fill-warning text-warning" aria-hidden /> {c.rating}</span>
+-                  <Badge tone="peach">-{Math.round(c.partnerDiscount * 100)}% con MediCall</Badge>
++                  <Badge tone="peach">-{Math.round(c.partnerDiscount * 100)}% con {BRAND.name}</Badge>
+                 </div>
+                 <Button className="w-full" onClick={() => setSel(c)}><CalendarCheck className="size-4" /> Agendar · {c.nextSlot}</Button>
+               </Card>
+diff --git a/src/features/doctors/DoctorProfilePage.tsx b/src/features/doctors/DoctorProfilePage.tsx
+index 966b67c..263b382 100644
+--- a/src/features/doctors/DoctorProfilePage.tsx
++++ b/src/features/doctors/DoctorProfilePage.tsx
+@@ -11,6 +11,7 @@ import { Skeleton } from '@/components/ui/skeleton'
+ import { ErrorState } from '@/components/ui/states'
+ import { Stars } from '@/components/ui/stars'
+ import { cn, formatPEN } from '@/lib/utils'
++import { BRAND } from '@/config/app'
+ 
+ const WEEK = [['L', 1], ['M', 2], ['X', 3], ['J', 4], ['V', 5], ['S', 6], ['D', 0]] as const
+ const hour = (h: number) => `${String(h).padStart(2, '0')}:00`
+@@ -31,7 +32,7 @@ function Schedule({ a }: { a: Availability }) {
+ }
+ 
+ function Reviews({ data }: { data: DoctorReviews }) {
+-  if (data.total === 0) return <p className="rounded-2xl bg-surface-2 p-4 text-sm text-muted">Este profesional es nuevo en MediCall y aún no tiene reseñas. Las reseñas solo pueden dejarlas pacientes que se atendieron.</p>
++  if (data.total === 0) return <p className="rounded-2xl bg-surface-2 p-4 text-sm text-muted">Este profesional es nuevo en {BRAND.name} y aún no tiene reseñas. Las reseñas solo pueden dejarlas pacientes que se atendieron.</p>
+   return (
+     <div className="space-y-5">
+       <div className="flex items-center gap-5">
+@@ -82,7 +83,7 @@ export default function DoctorProfilePage() {
+         <div className="min-w-0">
+           <h1 className="flex flex-wrap items-center gap-x-2 text-3xl font-bold leading-tight">{d.name}{d.verified && <BadgeCheck className="size-6 text-primary-strong" aria-label="Colegiatura verificada" />}</h1>
+           <p className="text-muted">{d.specialty}</p>
+-          <p className="mt-1 text-xs text-muted">Colegiatura {d.cmp}{d.verified ? ' · verificada por MediCall' : ''}</p>
++          <p className="mt-1 text-xs text-muted">Colegiatura {d.cmp}{d.verified ? ' · verificada por ' + BRAND.name : ''}</p>
+           <div className="mt-2 flex flex-wrap gap-2">
+             <Badge tone={d.online ? 'mint' : 'neutral'}>{d.online ? 'En línea ahora' : 'Fuera de línea'}</Badge>
+             {d.reviews === 0 && <Badge tone="lavender">Nuevo</Badge>}
+diff --git a/src/features/legal/LegalPage.tsx b/src/features/legal/LegalPage.tsx
+new file mode 100644
+index 0000000..24a0a8b
+--- /dev/null
++++ b/src/features/legal/LegalPage.tsx
+@@ -0,0 +1,50 @@
++import { Link, Navigate, useParams } from 'react-router-dom'
++import { BRAND, EMERGENCY, LEGAL_VERSION } from '@/config/app'
++
++type Doc = { title: string; sections: { h: string; p: string }[] }
++
++const docs: Record<string, Doc> = {
++  consentimiento: {
++    title: 'Consentimiento informado de telesalud',
++    sections: [
++      { h: 'Qué es una teleconsulta', p: 'Es una atención de salud a distancia por videollamada con un profesional colegiado. Tiene limitaciones: el profesional no puede realizar examen físico, y puede indicarte que acudas a una atención presencial.' },
++      { h: 'No es un servicio de emergencias', p: `Ante dolor en el pecho, dificultad para respirar, pérdida de conciencia, sangrado abundante u otra urgencia, llama al ${EMERGENCY.number} (${EMERGENCY.label}) o acude a la emergencia más cercana. No uses la plataforma para estos casos.` },
++      { h: 'Tu aceptación', p: 'Declaras que la información que brindas es veraz, que entiendes las limitaciones de la atención a distancia y que puedes retirar tu consentimiento en cualquier momento escribiendo a ' + BRAND.supportEmail + '.' },
++    ],
++  },
++  privacidad: {
++    title: 'Política de privacidad',
++    sections: [
++      { h: 'Responsable del tratamiento', p: `${BRAND.legalEntity}. Contacto: ${BRAND.supportEmail}.` },
++      { h: 'Datos que tratamos', p: 'Datos de identificación y contacto, y datos de salud (síntomas, alergias, historial de consultas, recetas). Los datos de salud son datos sensibles según la Ley N.° 29733, de Protección de Datos Personales.' },
++      { h: 'Finalidad', p: 'Brindarte atención de salud, agendar y gestionar tus consultas, emitir recetas y cumplir obligaciones legales. No vendemos tus datos.' },
++      { h: 'Tus derechos (ARCO)', p: `Puedes ejercer tus derechos de acceso, rectificación, cancelación y oposición escribiendo a ${BRAND.supportEmail}.` },
++    ],
++  },
++  terminos: {
++    title: 'Términos y condiciones',
++    sections: [
++      { h: 'Naturaleza del servicio', p: `${BRAND.name} conecta pacientes con profesionales de la salud colegiados. La responsabilidad clínica de cada atención corresponde al profesional que la brinda.` },
++      { h: 'Uso adecuado', p: 'No compartas tu cuenta, no grabes la consulta sin autorización del profesional y no uses el servicio para emergencias.' },
++    ],
++  },
++}
++
++/** Textos legales en BORRADOR: deben ser revisados y aprobados por el área legal del cliente antes de producción. */
++export default function LegalPage() {
++  const { doc = '' } = useParams()
++  const d = docs[doc]
++  if (!d) return <Navigate to="/" replace />
++  return (
++    <main className="mx-auto max-w-2xl space-y-6 px-5 py-10">
++      <p role="note" className="rounded-2xl bg-surface-2 p-3 text-sm text-muted">Borrador pendiente de validación legal · versión {LEGAL_VERSION}</p>
++      <h1 className="text-3xl font-bold">{d.title}</h1>
++      {d.sections.map((s) => (
++        <section key={s.h} className="space-y-1.5"><h2 className="text-lg font-semibold">{s.h}</h2><p className="text-muted">{s.p}</p></section>
++      ))}
++      <nav className="flex flex-wrap gap-4 text-sm underline">
++        {Object.entries(docs).filter(([k]) => k !== doc).map(([k, v]) => <Link key={k} to={`/legal/${k}`}>{v.title}</Link>)}
++      </nav>
++    </main>
++  )
++}
+diff --git a/src/features/onboarding/OnboardingPage.tsx b/src/features/onboarding/OnboardingPage.tsx
+index d955e09..ebfef3b 100644
+--- a/src/features/onboarding/OnboardingPage.tsx
++++ b/src/features/onboarding/OnboardingPage.tsx
+@@ -1,6 +1,6 @@
+ import { zodResolver } from '@hookform/resolvers/zod'
+ import { useForm } from 'react-hook-form'
+-import { useNavigate } from 'react-router-dom'
++import { Link, useNavigate } from 'react-router-dom'
+ import { toast } from 'sonner'
+ import { z } from 'zod'
+ import { useCompleteOnboarding } from '@/api/hooks'
+@@ -9,6 +9,7 @@ import { Lottie } from '@/components/ui/lottie'
+ import { Orbs } from '@/components/ui/orbs'
+ import { Button } from '@/components/ui/button'
+ import { Field } from '@/components/ui/input'
++import { BRAND, LEGAL_VERSION } from '@/config/app'
+ 
+ const schema = z.object({
+   firstName: z.string().trim().min(2, 'Ingresa tu nombre'),
+@@ -27,8 +28,8 @@ export default function OnboardingPage() {
+ 
+   const onSubmit = (v: Values) =>
+     complete.mutate(
+-      { firstName: v.firstName, lastName: v.lastName, phone: v.phone, birthDate: v.birthDate, allergies: v.allergies?.split(',').map((a) => a.trim()).filter(Boolean) ?? [] },
+-      { onSuccess: () => { toast.success('¡Bienvenida! +20 puntos Vida'); nav('/', { replace: true }) } },
++      { firstName: v.firstName, lastName: v.lastName, phone: v.phone, birthDate: v.birthDate, allergies: v.allergies?.split(',').map((a) => a.trim()).filter(Boolean) ?? [], consent: { version: LEGAL_VERSION, acceptedAt: new Date().toISOString() } },
++      { onSuccess: () => { toast.success('¡Te damos la bienvenida! +20 puntos Vida'); nav('/', { replace: true }) } },
+     )
+ 
+   return (
+@@ -48,7 +49,7 @@ export default function OnboardingPage() {
+         <Field label="Alergias (opcional)" placeholder="Penicilina, polvo…" {...register('allergies')} />
+         <label className="flex items-start gap-3 text-sm">
+           <input type="checkbox" className="mt-0.5 size-5 accent-[var(--primary-strong)]" {...register('consent')} />
+-          <span>Acepto el consentimiento informado de telesalud y el tratamiento de mis datos personales.</span>
++          <span>Acepto el <Link to="/legal/consentimiento" target="_blank" className="underline">consentimiento informado de telesalud</Link> y el tratamiento de mis datos personales según la <Link to="/legal/privacidad" target="_blank" className="underline">política de privacidad</Link> de {BRAND.name}.</span>
+         </label>
+         {errors.consent && <p role="alert" className="text-sm text-danger-foreground dark:text-danger">{errors.consent.message}</p>}
+         <Button type="submit" size="lg" className="w-full" loading={complete.isPending}>Comenzar</Button>
+diff --git a/src/features/pro/ProRegisterPage.tsx b/src/features/pro/ProRegisterPage.tsx
+index 640c420..e069f88 100644
+--- a/src/features/pro/ProRegisterPage.tsx
++++ b/src/features/pro/ProRegisterPage.tsx
+@@ -8,6 +8,7 @@ import { useProfile, useRegisterPro } from '@/api/hooks'
+ import { Button } from '@/components/ui/button'
+ import { Field, SelectField, TextareaField } from '@/components/ui/input'
+ import { cn } from '@/lib/utils'
++import { BRAND } from '@/config/app'
+ 
+ const SPECIALTIES = ['Medicina general', 'Medicina interna', 'Pediatría', 'Dermatología', 'Psicología clínica', 'Ginecología', 'Cardiología', 'Nutrición', 'Traumatología', 'Otra']
+ const LANGUAGES = ['Español', 'Inglés', 'Quechua', 'Portugués']
+@@ -53,7 +54,7 @@ export default function ProRegisterPage() {
+   return (
+     <div className="mx-auto max-w-xl pb-10">
+       <button type="button" aria-label="Volver" onClick={() => nav(-1)} className="mb-4 grid size-10 place-items-center rounded-full bg-surface-2 hover:bg-border"><ArrowLeft className="size-4" /></button>
+-      <h1 className="text-4xl font-bold leading-tight">Ofrece tus servicios en MediCall</h1>
++      <h1 className="text-4xl font-bold leading-tight">Ofrece tus servicios en {BRAND.name}</h1>
+       <p className="mb-6 mt-2 text-sm text-muted">Atiende pacientes por videollamada como profesional independiente: tú pones tu tarifa y tu horario. Verificamos tu colegiatura antes de publicar tu perfil.</p>
+       {profile.data && <p className="mb-6 rounded-2xl bg-surface-2 p-3 text-sm">Tu perfil público usará tu nombre: <b>{profile.data.firstName} {profile.data.lastName}</b>.</p>}
+ 
+@@ -98,7 +99,7 @@ export default function ProRegisterPage() {
+ 
+         <label className="flex items-start gap-3 text-sm">
+           <input type="checkbox" className="mt-0.5 size-5 accent-[var(--primary-strong)]" {...reg('consent')} />
+-          <span>Declaro que mis datos profesionales son verídicos y acepto los términos para profesionales de MediCall.</span>
++          <span>Declaro que mis datos profesionales son verídicos y acepto los términos para profesionales de {BRAND.name}.</span>
+         </label>
+         {errors.consent && <p role="alert" className="text-sm text-danger-foreground dark:text-danger">{errors.consent.message}</p>}
+ 
+diff --git a/src/features/pro/ProStatusPage.tsx b/src/features/pro/ProStatusPage.tsx
+index 1a8aa1f..7bf93cd 100644
+--- a/src/features/pro/ProStatusPage.tsx
++++ b/src/features/pro/ProStatusPage.tsx
+@@ -11,6 +11,7 @@ import { Lottie } from '@/components/ui/lottie'
+ import { Skeleton } from '@/components/ui/skeleton'
+ import { ErrorState } from '@/components/ui/states'
+ import { formatPEN } from '@/lib/utils'
++import { BRAND } from '@/config/app'
+ 
+ export default function ProStatusPage() {
+   const pro = usePro()
+@@ -25,7 +26,7 @@ export default function ProStatusPage() {
+ 
+   return (
+     <div className="mx-auto max-w-xl space-y-5">
+-      <PageHeader title="Mi perfil profesional" subtitle="Así te ven los pacientes en MediCall." />
++      <PageHeader title="Mi perfil profesional" subtitle={`Así te ven los pacientes en ${BRAND.name}.`} />
+ 
+       <Card className="flex flex-col items-center gap-2 p-6 text-center" role="status" aria-live="polite">
+         <Lottie name={pending ? 'radar' : 'success'} loop={pending} className="size-40" />
+diff --git a/src/features/profile/ProfilePage.tsx b/src/features/profile/ProfilePage.tsx
+index b29eb26..f642d7c 100644
+--- a/src/features/profile/ProfilePage.tsx
++++ b/src/features/profile/ProfilePage.tsx
+@@ -12,6 +12,7 @@ import { Skeleton } from '@/components/ui/skeleton'
+ import { ErrorState } from '@/components/ui/states'
+ import { PageHeader } from '@/components/PageHeader'
+ import { useTheme } from '@/stores/theme'
++import { BRAND, EMERGENCY, IS_DEMO } from '@/config/app'
+ 
+ export default function ProfilePage() {
+   const { data: p, isPending, isError, refetch } = useProfile()
+@@ -41,8 +42,8 @@ export default function ProfilePage() {
+         <label className="flex cursor-pointer items-center justify-between p-4"><span className="flex items-center gap-3 font-medium"><Moon className="size-5" aria-hidden /> Modo oscuro</span>
+           <Switch.Root checked={theme === 'dark'} onCheckedChange={(on) => setTheme(on ? 'dark' : 'light')} aria-label="Modo oscuro" className="relative h-7 w-12 rounded-full bg-border transition data-[state=checked]:bg-primary-strong"><Switch.Thumb className="block size-5 translate-x-1 rounded-full bg-white shadow transition data-[state=checked]:translate-x-6" /></Switch.Root>
+         </label>
+-        <div className="flex items-center gap-3 p-4 text-sm text-muted"><ShieldCheck className="size-5 shrink-0" aria-hidden /> MediCall no reemplaza servicios de emergencia. Ante una urgencia llama al 106.</div>
+-        <button type="button" onClick={() => { resetDb(); qc.clear(); toast.success('Datos de demostración reiniciados'); window.location.assign('/') }} className="flex w-full items-center gap-3 p-4 text-left font-medium hover:bg-surface-2"><RotateCcw className="size-5" aria-hidden /> Reiniciar datos de demo</button>
++        <div className="flex items-center gap-3 p-4 text-sm text-muted"><ShieldCheck className="size-5 shrink-0" aria-hidden /> {BRAND.name} no reemplaza servicios de emergencia. Ante una urgencia llama al {EMERGENCY.number}.</div>
++        {IS_DEMO && <button type="button" onClick={() => { resetDb(); qc.clear(); toast.success('Datos de demostración reiniciados'); window.location.assign('/') }} className="flex w-full items-center gap-3 p-4 text-left font-medium hover:bg-surface-2"><RotateCcw className="size-5" aria-hidden /> Reiniciar datos de demo</button>}
+         <button type="button" onClick={() => toast('Cerrar sesión estará disponible con el backend real')} className="flex w-full items-center gap-3 p-4 text-left font-medium hover:bg-surface-2"><LogOut className="size-5" aria-hidden /> Cerrar sesión</button>
+       </Card>
+     </div>
+diff --git a/src/features/triage/ResultPage.tsx b/src/features/triage/ResultPage.tsx
+index 00ffa6d..02b9ca7 100644
+--- a/src/features/triage/ResultPage.tsx
++++ b/src/features/triage/ResultPage.tsx
+@@ -5,6 +5,7 @@ import { toast } from 'sonner'
+ import { useDoctor, useRequestConsultation, useValidateCoupon } from '@/api/hooks'
+ import { Button } from '@/components/ui/button'
+ import { Card } from '@/components/ui/card'
++import { EMERGENCY } from '@/config/app'
+ import { Field } from '@/components/ui/input'
+ import { cn, formatPEN } from '@/lib/utils'
+ import { useFlow } from '@/stores/triage'
+@@ -53,7 +54,7 @@ export default function ResultPage() {
+ 
+       {emergency ? (
+         <div className="space-y-3">
+-          <Button asChild size="lg" variant="danger" className="w-full"><a href="tel:106"><Phone className="size-4" /> Llamar al 106 (SAMU)</a></Button>
++          <Button asChild size="lg" variant="danger" className="w-full"><a href={`tel:${EMERGENCY.number}`}><Phone className="size-4" /> Llamar al {EMERGENCY.number} ({EMERGENCY.label})</a></Button>
+           <Button asChild size="lg" variant="outline" className="w-full"><Link to="/clinicas"><Building2 className="size-4" /> Ver clínicas cercanas</Link></Button>
+         </div>
+       ) : (
+diff --git a/vercel.json b/vercel.json
+index d21ccec..b99bf37 100644
+--- a/vercel.json
++++ b/vercel.json
+@@ -4,9 +4,27 @@
+   "buildCommand": "npm run build",
+   "outputDirectory": "dist",
+   "rewrites": [
++    { "source": "/(.*)", "destination": "/index.html" }
++  ],
++  "headers": [
+     {
+       "source": "/(.*)",
+-      "destination": "/index.html"
++      "headers": [
++        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://res.cloudinary.com; font-src 'self' data:; media-src 'self' blob:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" },
++        { "key": "Strict-Transport-Security", "value": "max-age=63072000; includeSubDomains; preload" },
++        { "key": "X-Content-Type-Options", "value": "nosniff" },
++        { "key": "X-Frame-Options", "value": "DENY" },
++        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
++        { "key": "Permissions-Policy", "value": "camera=(self), microphone=(self), geolocation=(), payment=()" }
++      ]
++    },
++    {
++      "source": "/assets/(.*)",
++      "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
++    },
++    {
++      "source": "/(sw.js|index.html)",
++      "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+     }
+   ]
+ }
+-- 
+2.43.0
+
